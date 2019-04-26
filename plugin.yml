@@ -1,0 +1,8 @@
+name: GlobalShopping
+main: moe.kira.globalshopping.GlobalShopping
+version: 0.1
+api-version: 1.13
+author: SotrForgotten
+commands:
+  gs:
+    usage: /gs
