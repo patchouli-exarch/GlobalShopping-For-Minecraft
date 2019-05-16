@@ -23,9 +23,14 @@ import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
+import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
+import org.bukkit.event.inventory.CraftItemEvent;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryDragEvent;
+import org.bukkit.event.inventory.InventoryInteractEvent;
+import org.bukkit.event.inventory.InventoryMoveItemEvent;
+import org.bukkit.event.inventory.PrepareItemCraftEvent;
 import org.bukkit.event.player.AsyncPlayerChatEvent;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.InventoryHolder;
@@ -167,6 +172,8 @@ public class GlobalShopping extends JavaPlugin implements Listener {
                         }
                     }
                 }));
+                sender.sendMessage(" §5> §6插件配置文件已重载。");
+                ((Player) sender).playSound(((Player) sender).getLocation(), Sound.BLOCK_END_PORTAL_FRAME_FILL, 100, 1);
                 return true;
             } else if (args[0].equalsIgnoreCase("add") && sender.isOp()) {
                 allowedItems.add(((Player) sender).getInventory().getItemInMainHand().getType());
@@ -186,6 +193,11 @@ public class GlobalShopping extends JavaPlugin implements Listener {
             if (args[0].equalsIgnoreCase("import")) {
                 try {
                     int price = Integer.valueOf(args[1]);
+                    if (price <= 0) {
+                        ((Player) sender).playSound(((Player) sender).getLocation(), Sound.BLOCK_END_PORTAL_FRAME_FILL, 100, 1);
+                        sender.sendMessage(" §5> §6由于格式不符， 贸易值转换已取消。");
+                        return true;
+                    }
                     
                     if (!playerPoints.getAPI().take(sender.getName(), price)) {
                         sender.sendMessage(" §5> §6由于点卷不足， 贸易值转换已取消。");
@@ -218,6 +230,11 @@ public class GlobalShopping extends JavaPlugin implements Listener {
             if (args[0].equalsIgnoreCase("export")) {
                 try {
                     int price = Integer.valueOf(args[1]);
+                    if (price <= 0) {
+                        ((Player) sender).playSound(((Player) sender).getLocation(), Sound.BLOCK_END_PORTAL_FRAME_FILL, 100, 1);
+                        sender.sendMessage(" §5> §6由于格式不符， 贸易值转换已取消。");
+                        return true;
+                    }
                     
                     for (BusinessMoneyData moneyData : economy) {
                         if (moneyData.owner.equals(sender.getName())) {
@@ -254,39 +271,56 @@ public class GlobalShopping extends JavaPlugin implements Listener {
     }
     
     private void createAndOpenInventoryFor(Player player, int status) {
+        // get current title index
         InventoryView now = player.getOpenInventory();
-        int nowIndex = 1;
-        int pages = (int) Math.floor(business.size() / 45) + 1;
-        pages = pages < 1 ? 1 : pages;
+        int currentIndex = 1;
+        int totalPages = (int) Math.floor(business.size() / 45) + 1; // floor
+        totalPages = totalPages < 1 ? 1 : totalPages; // fix again
         
-        if (status != 1) {
-            nowIndex = 1;
-            if (now.getTitle().startsWith("§l大宗货物交易所")) {
-                nowIndex = Integer.parseInt(now.getTitle().substring(12, now.getTitle().length() - 2));
-            }
-        }
+        // parse index according to status
+        if (status != 1) // next page = 2 or prev page = 3, default to 1 means page 1
+            currentIndex = Integer.parseInt(now.getTitle().substring(12, now.getTitle().length() - 2)); // current index
         
         int slots = 0;
-        Inventory inventory = Bukkit.createInventory(InventoryHolder.class.cast(player), 54, "§l大宗货物交易所 §8" + (status == 1 ? nowIndex : status == 2 ? nowIndex + 1 : nowIndex - 1 < 1 ? 1 : nowIndex - 1) + "/" + pages);
-        int expectedIndexMax = status == 1 || (status == 3 && nowIndex == 1) ? 45 : status == 2 ? (nowIndex + 1) * 45 : nowIndex * 45;
+        // get and fix new index
+        int fixedNewIndex = status == 4 ? currentIndex : (status == 1 ? 1 : status == 2 ?
+                /* next */ (currentIndex + 1 <= totalPages ? currentIndex + 1 : totalPages) :
+                /* prev */ currentIndex - 1 < 1 ? 1 : currentIndex - 1);
+        
+        Inventory inventory = Bukkit.createInventory(InventoryHolder.class.cast(player), 54, "§l大宗货物交易所 §8" + fixedNewIndex + "/" + totalPages);
+        
+        // get excepted next end index
+        int expectedIndexMax = status == 1 ? 45 : fixedNewIndex * 45; // the new index have been fixed to avoid overflow or negetive
         
         BusinessData[] datas = business.toArray(new BusinessData[business.size()]);
-        // Sort
-        Arrays.sort(datas, (business1, business2) -> business1.price > business2.price ? 1 : 0);
+        // sort
+        Arrays.sort(datas, (business1, business2) -> business1.price > business2.price ? 1 : -1);
         business = Lists.newArrayList(datas);
         
-        int expectedBusiness = business.size() > expectedIndexMax ? expectedIndexMax : business.size();
-        for (int i = status == 1 || (status == 3 && nowIndex == 1) ? 0 : status == 2 ? nowIndex * 45 - 1 : (nowIndex - 1) * 45 - 1; i < expectedBusiness; i++) {
-            BusinessData data = business.get(i);
-            @SuppressWarnings("deprecation")
-            ItemStack sample = data.data2 == -111 ? new ItemStack(data.material, data.count, data.data) : new ItemStack(data.material, data.count, data.data, data.data2);
+        if (!business.isEmpty()) {
+            // anyway we fix this again
+            int expectedBusiness = business.size() >= expectedIndexMax ? expectedIndexMax : business.size();
+            expectedBusiness = expectedBusiness < 45 ? 45 : expectedBusiness;
             
-            // Process item
-            ItemMeta meta = sample.getItemMeta();
-            meta.setLore(Lists.newArrayList("§6价格： §a" + data.price, "§6所有者： " + data.owner, player.getName().equals(data.owner) ? "点按以下架" : "点按以采购"));
-            sample.setItemMeta(meta);
+            int startIndex = (fixedNewIndex - 1) * 45; // the new index have been fixed to avoid overflow or negetive
+            startIndex = startIndex >= business.size() ? business.size() - 1 : startIndex;
+            startIndex = startIndex < 0 ? 0 : startIndex;
             
-            inventory.setItem(slots++, sample);
+            for (int i = startIndex; i < expectedBusiness; i++) {
+                if (i >= business.size())
+                    break;
+                
+                BusinessData data = business.get(i);
+                @SuppressWarnings("deprecation")
+                ItemStack sample = data.data2 == -111 ? new ItemStack(data.material, data.count, data.data) : new ItemStack(data.material, data.count, data.data, data.data2);
+                
+                // Process item
+                ItemMeta meta = sample.getItemMeta();
+                meta.setLore(Lists.newArrayList("§6价格： §a" + data.price, "§6所有者： " + data.owner, player.getName().equals(data.owner) ? "点按以下架" : "点按以采购"));
+                sample.setItemMeta(meta);
+                
+                inventory.setItem(slots++, sample);
+            }
         }
         
         // Newest business
@@ -296,7 +330,7 @@ public class GlobalShopping extends JavaPlugin implements Listener {
         meta.addItemFlags(ItemFlag.HIDE_POTION_EFFECTS);
         itemStack.setItemMeta(meta);
         
-        inventory.setItem(45, nowIndex > 1 ? bottonPrev : itemStack);
+        inventory.setItem(45, fixedNewIndex > 1 ? bottonPrev : itemStack); // Use the now index
         inventory.setItem(46, itemStack);
         slots = 47;
         
@@ -323,7 +357,7 @@ public class GlobalShopping extends JavaPlugin implements Listener {
         
         inventory.setItem(51, itemStack);
         inventory.setItem(52, bottonNewBusiness);
-        inventory.setItem(53, nowIndex >= pages - 1 ? itemStack : bottonNext);
+        inventory.setItem(53, fixedNewIndex >= totalPages ? itemStack : bottonNext);
         
         player.openInventory(inventory);
     }
@@ -334,6 +368,50 @@ public class GlobalShopping extends JavaPlugin implements Listener {
     private ItemStack bottonNext;
     private ItemStack bottonPrev;
     private ItemStack bottonNewBusiness;
+    
+    @EventHandler
+    public void onCraft(CraftItemEvent event) {
+        if (event.getCurrentItem().hasItemMeta() && event.getCurrentItem().getItemMeta().hasLore()) {
+            List<String> lore = event.getCurrentItem().getItemMeta().getLore();
+            if (lore.contains("按下以浏览下一页商品") || lore.contains("按下以浏览上一页商品") || lore.contains("按下以开始上架商品") || lore.contains("点按以采购")) {
+                event.setCancelled(true);
+                event.getClickedInventory().remove(event.getCurrentItem());
+            }
+        }
+    }
+    
+    @EventHandler
+    public void onCraft(InventoryMoveItemEvent event) {
+        if (event.getItem() != null && event.getItem().hasItemMeta() && event.getItem().getItemMeta().hasLore()) {
+            List<String> lore = event.getItem().getItemMeta().getLore();
+            if (lore.contains("按下以浏览下一页商品") || lore.contains("按下以浏览上一页商品") || lore.contains("按下以开始上架商品") || lore.contains("点按以采购")) {
+                event.setCancelled(true);
+                event.getInitiator().remove(event.getItem());
+            }
+        }
+    }
+    
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onCraft(InventoryClickEvent event) {
+        if (event.getCurrentItem() != null && event.getCurrentItem().hasItemMeta() && event.getCurrentItem().getItemMeta().hasLore()) {
+            List<String> lore = event.getCurrentItem().getItemMeta().getLore();
+            if (lore.contains("按下以浏览下一页商品") || lore.contains("按下以浏览上一页商品") || lore.contains("按下以开始上架商品") || lore.contains("点按以采购")) {
+                event.setCancelled(true);
+                event.getClickedInventory().remove(event.getCurrentItem());
+            }
+        }
+    }
+    
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onCraft(InventoryDragEvent event) {
+        if (event.getCursor() != null && event.getCursor().hasItemMeta() && event.getCursor().getItemMeta().hasLore()) {
+            List<String> lore = event.getCursor().getItemMeta().getLore();
+            if (lore.contains("按下以浏览下一页商品") || lore.contains("按下以浏览上一页商品") || lore.contains("按下以开始上架商品") || lore.contains("点按以采购")) {
+                event.setCancelled(true);
+                event.getInventory().remove(event.getCursor());
+            }
+        }
+    }
     
     @SuppressWarnings("deprecation")
     @EventHandler
@@ -435,11 +513,13 @@ public class GlobalShopping extends JavaPlugin implements Listener {
                     Bukkit.dispatchCommand(((Player) event.getWhoClicked()), "gs query");
                     
                     event.setCancelled(true);
+                    Bukkit.dispatchCommand(((Player) event.getWhoClicked()), "gs");
                     return;
                 }
             }
             
-            ((Player) event.getWhoClicked()).sendTitle("§c操作失败", "§6你所选择的货物已不存在");
+            event.getWhoClicked().closeInventory();
+            ((Player) event.getWhoClicked()).sendTitle("§c未购买", "§6你所选择的货物已不存在");
             ((Player) event.getWhoClicked()).playSound(((Player) event.getWhoClicked()).getLocation(), Sound.BLOCK_END_PORTAL_FRAME_FILL, 100, 1);
             
             event.setCancelled(true);
@@ -453,7 +533,7 @@ public class GlobalShopping extends JavaPlugin implements Listener {
                     business.remove(data);
                     
                     // Notify
-                    event.getWhoClicked().closeInventory();
+                    createAndOpenInventoryFor((Player) event.getWhoClicked(), 4);
                     event.getWhoClicked().getInventory().addItem(data.data2 == -111 ? new ItemStack(data.material, data.count, data.data) : new ItemStack(data.material, data.count, data.data, data.data2));
                     ((Player) event.getWhoClicked()).sendTitle("§6已下架", "你从市场下架了 §a" + event.getCurrentItem().getAmount() + " §r件 §6" + getItemName(event.getCurrentItem()));
                     ((Player) event.getWhoClicked()).playSound(((Player) event.getWhoClicked()).getLocation(), Sound.BLOCK_END_PORTAL_FRAME_FILL, 100, 1);
